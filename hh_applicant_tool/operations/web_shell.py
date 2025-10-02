@@ -2,7 +2,9 @@
 import argparse
 import json
 import logging
+import random
 import threading
+import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
@@ -12,6 +14,17 @@ from ..main import BaseOperation
 from ..main import Namespace as BaseNamespace
 
 logger = logging.getLogger(__package__)
+
+# Global state for mass application progress
+mass_apply_progress = {
+    "active": False,
+    "total": 0,
+    "processed": 0,
+    "applied": 0,
+    "skipped": 0,
+    "errors": 0,
+    "log": []
+}
 
 
 class Namespace(BaseNamespace):
@@ -189,6 +202,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             color: #666;
             font-size: 14px;
         }
+        .progress-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 15px 0;
+            padding: 15px;
+            background: #f0f0f0;
+            border-radius: 5px;
+        }
+        .progress-stats div {
+            padding: 10px;
+            background: white;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .progress-stats strong {
+            display: block;
+            font-size: 1.5em;
+            color: #667eea;
+            margin-top: 5px;
+        }
     </style>
 </head>
 <body>
@@ -223,6 +257,67 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     </div>
                     <div class="quick-action-btn" onclick="quickAction('/vacancies', 'GET', {text: 'python', per_page: 10})">
                         🔍 Поиск вакансий (Python)
+                    </div>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>🚀 Массовая рассылка откликов</h2>
+                <div class="info-box">
+                    <strong>ℹ️ Массовая рассылка:</strong> Автоматически откликается на все подходящие вакансии. 
+                    Процесс может занять несколько минут в зависимости от количества вакансий.
+                </div>
+                <form id="massApplyForm" onsubmit="return startMassApply(event)">
+                    <div class="form-group">
+                        <label for="resumeId">ID резюме (опционально):</label>
+                        <input type="text" id="resumeId" name="resumeId" placeholder="Оставьте пустым для использования основного резюме">
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="searchText">Поисковый запрос (опционально):</label>
+                        <input type="text" id="searchText" name="searchText" placeholder="python разработчик москва">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="schedule">Тип графика (опционально):</label>
+                        <select id="schedule" name="schedule">
+                            <option value="">Не важно</option>
+                            <option value="remote">Удаленная работа</option>
+                            <option value="fullDay">Полный день</option>
+                            <option value="shift">Сменный график</option>
+                            <option value="flexible">Гибкий график</option>
+                            <option value="flyInFlyOut">Вахтовый метод</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="coverLetter">Сопроводительное письмо (опционально):</label>
+                        <textarea id="coverLetter" name="coverLetter" placeholder="Если оставите пустым, будет использовано стандартное сообщение"></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="dryRun" name="dryRun">
+                            Тестовый режим (не отправлять отклики, только показать что будет)
+                        </label>
+                    </div>
+
+                    <button type="submit" id="massApplyBtn">🚀 Начать массовую рассылку</button>
+                    <button type="button" onclick="stopMassApply()" id="stopApplyBtn" style="display:none; background: #f44336;">⏹️ Остановить</button>
+                </form>
+
+                <div id="massApplyProgress" style="display: none;">
+                    <h3>📊 Прогресс рассылки</h3>
+                    <div class="progress-stats">
+                        <div>Всего вакансий: <strong id="totalVacancies">0</strong></div>
+                        <div>Обработано: <strong id="processedVacancies">0</strong></div>
+                        <div>Откликнулись: <strong id="appliedVacancies">0</strong></div>
+                        <div>Пропущено: <strong id="skippedVacancies">0</strong></div>
+                        <div>Ошибок: <strong id="errorVacancies">0</strong></div>
+                    </div>
+                    <div class="response">
+                        <strong>Лог операций:</strong>
+                        <pre id="massApplyLog"></pre>
                     </div>
                 </div>
             </div>
@@ -275,6 +370,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <script>
+        let progressCheckInterval = null;
+
         function quickAction(endpoint, method, params = {}) {
             document.getElementById('method').value = method;
             document.getElementById('endpoint').value = endpoint;
@@ -338,6 +435,117 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             responseDiv.style.display = 'block';
             responseDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
+
+        function startMassApply(event) {
+            event.preventDefault();
+
+            const resumeId = document.getElementById('resumeId').value.trim();
+            const searchText = document.getElementById('searchText').value.trim();
+            const schedule = document.getElementById('schedule').value;
+            const coverLetter = document.getElementById('coverLetter').value.trim();
+            const dryRun = document.getElementById('dryRun').checked;
+
+            const params = {
+                resume_id: resumeId || null,
+                search: searchText || null,
+                schedule: schedule || null,
+                message: coverLetter || null,
+                dry_run: dryRun
+            };
+
+            // Show progress section
+            document.getElementById('massApplyProgress').style.display = 'block';
+            document.getElementById('massApplyBtn').style.display = 'none';
+            document.getElementById('stopApplyBtn').style.display = 'inline-block';
+            
+            // Reset progress
+            updateProgress({
+                total: 0,
+                processed: 0,
+                applied: 0,
+                skipped: 0,
+                errors: 0,
+                log: ['⏳ Запуск массовой рассылки...']
+            });
+
+            fetch('/apply-mass', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify(params)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    alert('Ошибка: ' + data.message);
+                    resetMassApplyUI();
+                } else {
+                    // Start polling for progress
+                    startProgressPolling();
+                }
+            })
+            .catch(error => {
+                alert('Ошибка сети: ' + error.message);
+                resetMassApplyUI();
+            });
+
+            return false;
+        }
+
+        function startProgressPolling() {
+            progressCheckInterval = setInterval(() => {
+                fetch('/apply-progress')
+                    .then(response => response.json())
+                    .then(data => {
+                        updateProgress(data);
+                        if (!data.active) {
+                            stopProgressPolling();
+                            document.getElementById('massApplyBtn').style.display = 'inline-block';
+                            document.getElementById('stopApplyBtn').style.display = 'none';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error fetching progress:', error);
+                    });
+            }, 1000);
+        }
+
+        function stopProgressPolling() {
+            if (progressCheckInterval) {
+                clearInterval(progressCheckInterval);
+                progressCheckInterval = null;
+            }
+        }
+
+        function updateProgress(data) {
+            document.getElementById('totalVacancies').textContent = data.total;
+            document.getElementById('processedVacancies').textContent = data.processed;
+            document.getElementById('appliedVacancies').textContent = data.applied;
+            document.getElementById('skippedVacancies').textContent = data.skipped;
+            document.getElementById('errorVacancies').textContent = data.errors;
+            
+            const logElement = document.getElementById('massApplyLog');
+            logElement.textContent = data.log.join('\\n');
+            logElement.scrollTop = logElement.scrollHeight;
+        }
+
+        function stopMassApply() {
+            fetch('/apply-stop', { method: 'POST' })
+                .then(() => {
+                    stopProgressPolling();
+                    resetMassApplyUI();
+                })
+                .catch(error => {
+                    console.error('Error stopping:', error);
+                });
+        }
+
+        function resetMassApplyUI() {
+            document.getElementById('massApplyBtn').style.display = 'inline-block';
+            document.getElementById('stopApplyBtn').style.display = 'none';
+            stopProgressPolling();
+        }
     </script>
 </body>
 </html>
@@ -346,6 +554,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 class WebShellHandler(BaseHTTPRequestHandler):
     api_client: ApiClient = None
+    stop_requested: bool = False
 
     def log_message(self, format: str, *args: Any) -> None:
         """Override to use custom logger"""
@@ -358,6 +567,12 @@ class WebShellHandler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
             self.wfile.write(HTML_TEMPLATE.encode('utf-8'))
+        elif self.path == '/apply-progress':
+            # Return current progress
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(json.dumps(mass_apply_progress, ensure_ascii=False).encode('utf-8'))
         else:
             self.send_error(404)
 
@@ -405,8 +620,233 @@ class WebShellHandler(BaseHTTPRequestHandler):
                     'message': f'Неожиданная ошибка: {str(ex)}'
                 }
                 self.wfile.write(json.dumps(error_response, ensure_ascii=False, indent=2).encode('utf-8'))
+
+        elif self.path == '/apply-mass':
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+
+            try:
+                params = json.loads(post_data.decode('utf-8'))
+
+                # Check if already running
+                if mass_apply_progress['active']:
+                    self.send_response(200)
+                    self.send_header('Content-type', 'application/json; charset=utf-8')
+                    self.end_headers()
+                    error_response = {
+                        'error': True,
+                        'message': 'Массовая рассылка уже выполняется'
+                    }
+                    self.wfile.write(json.dumps(error_response, ensure_ascii=False).encode('utf-8'))
+                    return
+
+                # Start mass apply in a separate thread
+                thread = threading.Thread(
+                    target=self._run_mass_apply,
+                    args=(params,),
+                    daemon=True
+                )
+                thread.start()
+
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json; charset=utf-8')
+                self.end_headers()
+                success_response = {
+                    'success': True,
+                    'message': 'Массовая рассылка запущена'
+                }
+                self.wfile.write(json.dumps(success_response, ensure_ascii=False).encode('utf-8'))
+
+            except Exception as ex:
+                logger.exception("Error starting mass apply: %s", ex)
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json; charset=utf-8')
+                self.end_headers()
+                error_response = {
+                    'error': True,
+                    'message': f'Ошибка запуска: {str(ex)}'
+                }
+                self.wfile.write(json.dumps(error_response, ensure_ascii=False).encode('utf-8'))
+
+        elif self.path == '/apply-stop':
+            WebShellHandler.stop_requested = True
+            mass_apply_progress['active'] = False
+            mass_apply_progress['log'].append('⏹️ Остановка по запросу пользователя...')
+
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json; charset=utf-8')
+            self.end_headers()
+            success_response = {'success': True}
+            self.wfile.write(json.dumps(success_response, ensure_ascii=False).encode('utf-8'))
+
         else:
             self.send_error(404)
+
+    def _run_mass_apply(self, params: dict) -> None:
+        """Run mass application in background"""
+        global mass_apply_progress
+
+        # Reset state
+        mass_apply_progress = {
+            "active": True,
+            "total": 0,
+            "processed": 0,
+            "applied": 0,
+            "skipped": 0,
+            "errors": 0,
+            "log": ['🚀 Начало массовой рассылки...']
+        }
+        WebShellHandler.stop_requested = False
+
+        try:
+            # Get resume ID
+            resume_id = params.get('resume_id')
+            if not resume_id:
+                mass_apply_progress['log'].append('📄 Получение основного резюме...')
+                resumes = self.api_client.get('/resumes/mine')
+                if not resumes.get('items'):
+                    mass_apply_progress['log'].append('❌ Не найдено ни одного резюме')
+                    mass_apply_progress['active'] = False
+                    return
+                resume_id = resumes['items'][0]['id']
+                mass_apply_progress['log'].append(f'✅ Используется резюме: {resume_id}')
+
+            # Get similar vacancies
+            mass_apply_progress['log'].append('🔍 Поиск подходящих вакансий...')
+            vacancies = self._get_vacancies(resume_id, params)
+            mass_apply_progress['total'] = len(vacancies)
+            mass_apply_progress['log'].append(f'📊 Найдено вакансий: {len(vacancies)}')
+
+            if not vacancies:
+                mass_apply_progress['log'].append('ℹ️ Подходящие вакансии не найдены')
+                mass_apply_progress['active'] = False
+                return
+
+            # Get user info for message templates
+            me = self.api_client.get('/me')
+            message_template = params.get('message') or 'Меня заинтересовала ваша вакансия {vacancy_name}'
+            dry_run = params.get('dry_run', False)
+
+            if dry_run:
+                mass_apply_progress['log'].append('🧪 ТЕСТОВЫЙ РЕЖИМ - отклики не отправляются')
+
+            # Apply to vacancies
+            for vacancy in vacancies:
+                if WebShellHandler.stop_requested:
+                    mass_apply_progress['log'].append('⏹️ Остановлено пользователем')
+                    break
+
+                vacancy_name = vacancy.get('name', 'Без названия')
+                vacancy_id = vacancy['id']
+                vacancy_url = vacancy.get('alternate_url', '')
+
+                mass_apply_progress['processed'] += 1
+
+                # Skip if already applied
+                relations = vacancy.get('relations', [])
+                if relations:
+                    mass_apply_progress['log'].append(f'⏭️ Пропуск (уже откликались): {vacancy_name}')
+                    mass_apply_progress['skipped'] += 1
+                    continue
+
+                # Skip if has test
+                if vacancy.get('has_test'):
+                    mass_apply_progress['log'].append(f'⏭️ Пропуск (есть тест): {vacancy_name}')
+                    mass_apply_progress['skipped'] += 1
+                    continue
+
+                # Skip if archived
+                if vacancy.get('archived'):
+                    mass_apply_progress['log'].append(f'⏭️ Пропуск (в архиве): {vacancy_name}')
+                    mass_apply_progress['skipped'] += 1
+                    continue
+
+                try:
+                    # Format message
+                    message = message_template.format(
+                        vacancy_name=vacancy_name,
+                        employer_name=vacancy.get('employer', {}).get('name', ''),
+                        first_name=me.get('first_name', ''),
+                        last_name=me.get('last_name', '')
+                    )
+
+                    if not dry_run:
+                        # Apply to vacancy
+                        self.api_client.post('/negotiations', {
+                            'resume_id': resume_id,
+                            'vacancy_id': vacancy_id,
+                            'message': message
+                        })
+                        mass_apply_progress['log'].append(f'✅ Откликнулись: {vacancy_name}')
+                        mass_apply_progress['applied'] += 1
+
+                        # Delay between applications
+                        time.sleep(random.uniform(1, 3))
+                    else:
+                        mass_apply_progress['log'].append(f'🧪 [ТЕСТ] Откликнулись бы: {vacancy_name}')
+                        mass_apply_progress['applied'] += 1
+
+                except ApiError as ex:
+                    error_msg = str(ex)
+                    mass_apply_progress['log'].append(f'❌ Ошибка при отклике на {vacancy_name}: {error_msg}')
+                    mass_apply_progress['errors'] += 1
+
+                    # Stop if limit exceeded
+                    if 'limit' in error_msg.lower() or 'лимит' in error_msg.lower():
+                        mass_apply_progress['log'].append('🛑 Достигнут лимит откликов. Остановка.')
+                        break
+
+                except Exception as ex:
+                    mass_apply_progress['log'].append(f'❌ Неожиданная ошибка: {str(ex)}')
+                    mass_apply_progress['errors'] += 1
+
+            mass_apply_progress['log'].append('✅ Массовая рассылка завершена!')
+            mass_apply_progress['log'].append(f'📊 Итого: откликов {mass_apply_progress["applied"]}, пропущено {mass_apply_progress["skipped"]}, ошибок {mass_apply_progress["errors"]}')
+
+        except Exception as ex:
+            logger.exception("Mass apply error: %s", ex)
+            mass_apply_progress['log'].append(f'❌ Критическая ошибка: {str(ex)}')
+
+        finally:
+            mass_apply_progress['active'] = False
+
+    def _get_vacancies(self, resume_id: str, params: dict) -> list:
+        """Get similar vacancies"""
+        vacancies = []
+        search_text = params.get('search')
+        schedule = params.get('schedule')
+
+        for page in range(20):  # Max 20 pages
+            if WebShellHandler.stop_requested:
+                break
+
+            api_params = {
+                'page': page,
+                'per_page': 100,
+                'order_by': 'relevance'
+            }
+
+            if search_text:
+                api_params['text'] = search_text
+            if schedule:
+                api_params['schedule'] = schedule
+
+            try:
+                result = self.api_client.get(f'/resumes/{resume_id}/similar_vacancies', api_params)
+                vacancies.extend(result.get('items', []))
+
+                if page >= result.get('pages', 1) - 1:
+                    break
+
+                # Delay between pages
+                if page > 0:
+                    time.sleep(random.uniform(1, 2))
+
+            except ApiError as ex:
+                logger.error("Error fetching vacancies page %d: %s", page, ex)
+                break
+
+        return vacancies
 
 
 class Operation(BaseOperation):
