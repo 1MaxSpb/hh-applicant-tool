@@ -24,7 +24,7 @@ class Operation(BaseOperation):
 
     def run(self, args: Namespace, api_client: ApiClient, _) -> None:
         """Запускает интерактивную оболочку для работы с API"""
-        
+
         banner = """
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║  HH.RU API Interactive Shell                                          ║
@@ -53,60 +53,102 @@ class Operation(BaseOperation):
             """GET запрос к API"""
             try:
                 result = api_client.get(endpoint, params=params)
-                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+                output = json.dumps(
+                    result, ensure_ascii=False, indent=2, sort_keys=True
+                )
+                print(output)
                 return result
             except ApiError as ex:
                 print(f"❗ Ошибка API: {ex}", file=sys.stderr)
                 if hasattr(ex, 'data'):
-                    print(json.dumps(ex.data, ensure_ascii=False, indent=2), file=sys.stderr)
+                    error_data = json.dumps(
+                        ex.data, ensure_ascii=False, indent=2
+                    )
+                    print(error_data, file=sys.stderr)
                 return None
 
         def post(endpoint: str, **params):
             """POST запрос к API"""
             try:
                 result = api_client.post(endpoint, params=params)
-                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) if result else "✅ Успешно")
+                if result:
+                    output = json.dumps(
+                        result, ensure_ascii=False, indent=2, sort_keys=True
+                    )
+                    print(output)
+                else:
+                    print("✅ Успешно")
                 return result
             except ApiError as ex:
                 print(f"❗ Ошибка API: {ex}", file=sys.stderr)
                 if hasattr(ex, 'data'):
-                    print(json.dumps(ex.data, ensure_ascii=False, indent=2), file=sys.stderr)
+                    error_data = json.dumps(
+                        ex.data, ensure_ascii=False, indent=2
+                    )
+                    print(error_data, file=sys.stderr)
                 return None
 
         def put(endpoint: str, **params):
             """PUT запрос к API"""
             try:
                 result = api_client.put(endpoint, params=params)
-                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) if result else "✅ Успешно")
+                if result:
+                    output = json.dumps(
+                        result, ensure_ascii=False, indent=2, sort_keys=True
+                    )
+                    print(output)
+                else:
+                    print("✅ Успешно")
                 return result
             except ApiError as ex:
                 print(f"❗ Ошибка API: {ex}", file=sys.stderr)
                 if hasattr(ex, 'data'):
-                    print(json.dumps(ex.data, ensure_ascii=False, indent=2), file=sys.stderr)
+                    error_data = json.dumps(
+                        ex.data, ensure_ascii=False, indent=2
+                    )
+                    print(error_data, file=sys.stderr)
                 return None
 
         def delete(endpoint: str, **params):
             """DELETE запрос к API"""
             try:
                 result = api_client.delete(endpoint, params=params)
-                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) if result else "✅ Успешно")
+                if result:
+                    output = json.dumps(
+                        result, ensure_ascii=False, indent=2, sort_keys=True
+                    )
+                    print(output)
+                else:
+                    print("✅ Успешно")
                 return result
             except ApiError as ex:
                 print(f"❗ Ошибка API: {ex}", file=sys.stderr)
                 if hasattr(ex, 'data'):
-                    print(json.dumps(ex.data, ensure_ascii=False, indent=2), file=sys.stderr)
+                    error_data = json.dumps(
+                        ex.data, ensure_ascii=False, indent=2
+                    )
+                    print(error_data, file=sys.stderr)
                 return None
 
         def request(method: str, endpoint: str, **params):
             """Произвольный HTTP запрос к API"""
             try:
                 result = api_client.request(method, endpoint, params=params)
-                print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) if result else "✅ Успешно")
+                if result:
+                    output = json.dumps(
+                        result, ensure_ascii=False, indent=2, sort_keys=True
+                    )
+                    print(output)
+                else:
+                    print("✅ Успешно")
                 return result
             except ApiError as ex:
                 print(f"❗ Ошибка API: {ex}", file=sys.stderr)
                 if hasattr(ex, 'data'):
-                    print(json.dumps(ex.data, ensure_ascii=False, indent=2), file=sys.stderr)
+                    error_data = json.dumps(
+                        ex.data, ensure_ascii=False, indent=2
+                    )
+                    print(error_data, file=sys.stderr)
                 return None
 
         # Создаем локальное окружение для интерактивной оболочки
@@ -121,7 +163,7 @@ class Operation(BaseOperation):
         }
 
         print(banner)
-        
+
         # Запускаем интерактивную оболочку Python
         try:
             code.interact(local=local_vars, banner="", exitmsg="\n👋 До свидания!")
